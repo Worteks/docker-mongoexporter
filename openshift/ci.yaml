@@ -1,0 +1,310 @@
+apiVersion: v1
+kind: Template
+labels:
+  app: mongoexporter
+  template: mongoexporter-jenkins-pipeline
+metadata:
+  annotations:
+    description: MongoDB Exporter - Jenkinsfile
+      see https://github.com/Worteks/docker-mongoexporter
+    iconClass: icon-mongodb
+    openshift.io/display-name: MongoDB Exporter CI
+    tags: exporter,prometheus,mongodb
+  name: mongoexporter-jenkins-pipeline
+objects:
+- apiVersion: v1
+  kind: BuildConfig
+  metadata:
+    annotations:
+      description: Tests MongoDB Exporter images
+    name: mongoexporter-jenkins-pipeline
+  spec:
+    strategy:
+      jenkinsPipelineStrategy:
+        jenkinsfile: |-
+          def frontName    = 'cimxp'
+          def gitCommitMsg = ''
+          def templateMark = 'mgxp-jenkins-ci'
+          def templateSel  = 'jenkins-ci-mark'
+          pipeline {
+              agent {
+                  node { label 'maven' }
+              }
+              options {
+                  timeout(time: 95, unit: 'MINUTES')
+              }
+              parameters {
+                  string(defaultValue: '3', description: 'Max Retry', name: 'jobMaxRetry')
+                  string(defaultValue: '1', description: 'Retry Count', name: 'jobRetryCount')
+                  string(defaultValue: 'master', description: 'MongoDB Exporter Docker Image - Source Git Branch', name: 'mongoexporterBranch')
+                  string(defaultValue: 'master', description: 'MongoDB Exporter Docker Image - Source Git Hash', name: 'mongoexporterHash')
+                  string(defaultValue: '${GIT_SOURCE_HOST}/Worteks/docker-mongoexporter.git', description: 'MongoDB Exporter Docker Image - Source Git Repository', name: 'mongoexporterRepo')
+                  string(defaultValue: 'master', description: 'MongoDB Image Version', name: 'mongoVers')
+              }
+              stages {
+                  stage('pre-cleanup') {
+                      steps {
+                          script {
+                              openshift.withCluster() {
+                                  openshift.withProject() {
+                                      echo "Using project: ${openshift.project()}"
+                                      echo "cleaning up previous assets for mongoexporter-${frontName}-${params.mongoexporterHash}"
+                                      openshift.selector("buildconfigs", [ "${templateSel}": "${templateMark}-${params.mongoexporterHash}" ]).delete()
+                                      openshift.selector("deploymentconfigs", [ "${templateSel}": "${templateMark}-${params.mongoexporterHash}" ]).delete()
+                                      openshift.selector("configmaps", [ "${templateSel}": "${templateMark}-${params.mongoexporterHash}" ]).delete()
+                                      openshift.selector("secrets", [ "${templateSel}": "${templateMark}-${params.mongoexporterHash}" ]).delete()
+                                  }
+                              }
+                          }
+                      }
+                  }
+                  stage('create') {
+                      steps {
+                          script {
+                              openshift.withCluster() {
+                                  openshift.withProject() {
+                                      def namespace = "${openshift.project()}"
+                                      try {
+                                          timeout(10) {
+                                              def cloneProto = "http"
+                                              def created
+                                              def objectsFromTemplate
+                                              def privateRepo = false
+                                              def repoHost = params.mongoexporterRepo.split('/')[0]
+                                              def templatePath = "/tmp/workspace/${namespace}/${namespace}-mongoexporter-jenkins-pipeline/tmpmongoexporter${params.mongoexporterBranch}/openshift"
+                                              sh "git config --global http.sslVerify false"
+                                              sh "rm -fr tmpmongoexporter${params.mongoexporterBranch}; mkdir -p tmpmongoexporter${params.mongoexporterBranch}"
+                                              dir ("tmpmongoexporter${params.mongoexporterBranch}") {
+                                                  try {
+                                                      withCredentials([string(credentialsId: "git-${repoHost}", variable: 'GIT_TOKEN')]) {
+                                                          cloneProto = "https"
+                                                          privateRepo = true
+                                                          echo "cloning ${params.mongoexporterRepo} over https, using ${repoHost} token"
+                                                          try { git([ branch: "${params.mongoexporterBranch}", url: "https://${GIT_TOKEN}@${params.mongoexporterRepo}" ]) }
+                                                          catch(e2) {
+                                                              echo "Failed cloning ${params.mongoexporterRepo}#${params.mongoexporterBranch} - ${e2}"
+                                                              throw e2
+                                                          }
+                                                      }
+                                                  } catch(e) {
+                                                      if (privateRepo != true) {
+                                                          echo "caught ${e} - assuming no credentials required"
+                                                          echo "cloning ${params.mongoexporterRepo} over http"
+                                                          try { git([ branch: "${params.mongoexporterBranch}", url: "http://${params.mongoexporterRepo}" ]) }
+                                                          catch(e2) {
+                                                              echo "Failed cloning ${params.mongoexporterRepo}#${params.mongoexporterBranch} - ${e2}"
+                                                              throw e2
+                                                          }
+                                                      } else { throw e }
+                                                  }
+                                                  try {
+                                                      gitCommitMsg = sh(returnStdout: true, script: "git log -n 1").trim()
+                                                  } catch(e) { echo "In non-critical catch block resolving commit message - ${e}" }
+                                              }
+                                              try { sh "test -d ${templatePath}" }
+                                              catch (e) {
+                                                  echo "Could not find ./openshift in ${params.mongoexporterRepo}#${params.mongoexporterBranch}"
+                                                  throw e
+                                              }
+                                              echo "Processing MongoDBExporter:${params.mongoexporterHash}, from ${repoHost}, tagging to ${params.mongoexporterBranch}"
+                                              echo "Testing MongoDB:${params.mongoVers}"
+                                              try {
+                                                  echo " == Creating ImageStream =="
+                                                  objectsFromTemplate = openshift.process("-f", "${templatePath}/imagestream.yaml", '-p', "FRONTNAME=wsweet")
+                                                  echo "The template will create ${objectsFromTemplate.size()} objects"
+                                                  created = openshift.apply(objectsFromTemplate)
+                                                  created.withEach { echo "Created ${it.name()} with labels ${it.object().metadata.labels}" }
+                                              } catch(e) { echo "In non-critical catch block while creating ImageStream - ${e}" }
+                                              try {
+                                                  echo " == Creating BuildConfigs =="
+                                                  if (privateRepo) {
+                                                      withCredentials([string(credentialsId: "git-${repoHost}", variable: 'GIT_TOKEN')]) {
+                                                          objectsFromTemplate = openshift.process("-f", "${templatePath}/build-with-secret.yaml", '-p', "FRONTNAME=wsweet", '-p', "GIT_DEPLOYMENT_TOKEN=${GIT_TOKEN}",
+                                                              '-p', "MONGO_EXPORTER_REPOSITORY_REF=${params.mongoexporterHash}", '-p', "MONGO_EXPORTER_REPOSITORY_URL=${cloneProto}://${params.mongoexporterRepo}")
+                                                      }
+                                                  } else {
+                                                      objectsFromTemplate = openshift.process("-f", "${templatePath}/build.yaml", '-p', "FRONTNAME=wsweet",
+                                                          '-p', "MONGO_EXPORTER_REPOSITORY_REF=${params.mongoexporterHash}", '-p', "MONGO_EXPORTER_REPOSITORY_URL=${cloneProto}://${params.mongoexporterRepo}")
+                                                  }
+                                                  echo "The template will create ${objectsFromTemplate.size()} objects"
+                                                  for (o in objectsFromTemplate) { o.metadata.labels["${templateSel}"] = "${templateMark}-${params.mongoexporterHash}" }
+                                                  created = openshift.apply(objectsFromTemplate)
+                                                  created.withEach { echo "Created ${it.name()} from template with labels ${it.object().metadata.labels}" }
+                                              } catch(e) { echo "In non-critical catch block while creating BuildConfigs - ${e}" }
+                                              try {
+                                                  echo " == Creating Secrets =="
+                                                  objectsFromTemplate = openshift.process("-f", "${templatePath}/secret.yaml", '-p', "FRONTNAME=${frontName}-${params.mongoexporterHash}")
+                                                  echo "The template will create ${objectsFromTemplate.size()} objects"
+                                                  for (o in objectsFromTemplate) { o.metadata.labels["${templateSel}"] = "${templateMark}-${params.mongoexporterHash}" }
+                                                  created = openshift.create(objectsFromTemplate)
+                                                  created.withEach { echo "Created ${it.name()} from template with labels ${it.object().metadata.labels}" }
+                                              } catch(e) { echo "In non-critical catch block while creating Secret - ${e}" }
+                                              echo " == Creating Demo =="
+                                              objectsFromTemplate = openshift.process("-f", "${templatePath}/run-ephemeral.yaml", '-p', "FRONTNAME=${frontName}-${params.mongoexporterHash}",
+                                                  '-p', "MONGO_EXPORTER_IMAGE_TAG=${params.mongoexporterHash}", '-p', "MONGODB_VERSION=${params.mongoVers}")
+                                              echo "The template will create ${objectsFromTemplate.size()} objects"
+                                              for (o in objectsFromTemplate) { o.metadata.labels["${templateSel}"] = "${templateMark}-${params.mongoexporterHash}" }
+                                              created = openshift.create(objectsFromTemplate)
+                                              created.withEach { echo "Created ${it.name()} from template with labels ${it.object().metadata.labels}" }
+                                          }
+                                      } catch(e) {
+                                          echo "In catch block while creating resources - ${e}"
+                                          throw e
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                  }
+                  stage('build') {
+                      steps {
+                          script {
+                              openshift.withCluster() {
+                                  openshift.withProject() {
+                                      try {
+                                          timeout(25) {
+                                              echo "watching mongoexporter-wsweet-${params.mongoexporterHash} docker image build"
+                                              def builds = openshift.selector("bc", [ name: "mongoexporter-wsweet-${params.mongoexporterHash}" ]).related('builds')
+                                              builds.untilEach(1) { return (it.object().status.phase == "Complete") }
+                                          }
+                                      } catch(e) {
+                                          echo "In catch block while building Docker image - ${e}"
+                                          throw e
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                  }
+                  stage('deploy') {
+                      steps {
+                          script {
+                              openshift.withCluster() {
+                                  openshift.withProject() {
+                                      try {
+                                          timeout(10) {
+                                              def namespace = "${openshift.project()}"
+                                              try {
+                                                  sh """
+                                                  oc login https://kubernetes.default.svc.cluster.local --certificate-authority=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt --token=\$(cat /var/run/secrets/kubernetes.io/serviceaccount/token) > /dev/null 2>&1
+                                                  oc describe -n ${namespace} imagestreamtag mongoexporter-wsweet:${params.mongoexporterHash} || exit 1
+                                                  """
+                                              } catch(e) {
+                                                  echo "In catch block while looking for MongoExporter image - ${e}"
+                                                  throw e
+                                              }
+                                              retry(2) {
+                                                  echo "watching mongodb-${frontName}-${params.mongoexporterHash} deployment rollout"
+                                                  def dc = openshift.selector("dc", [ name: "mongodb-${frontName}-${params.mongoexporterHash}" ]).related('pods')
+                                                  dc.untilEach(1) { return (it.object().status.phase == "Running") }
+                                              }
+                                          }
+                                      } catch(e) {
+                                          echo "In catch block while deploying - ${e}"
+                                          throw e
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                  }
+                  stage('check') {
+                      steps {
+                          script {
+                              openshift.withCluster() {
+                                  openshift.withProject() {
+                                      try {
+                                          timeout(5) {
+                                              echo "waiting an additional 2 minutes for applications to finish starting up"
+                                              sleep 120
+                                              def namespace  = "${openshift.project()}"
+                                              retry(3) {
+                                                  def response = httpRequest ignoreSslErrors: true, url: "http://mongoexporter-${frontName}-${params.mongoexporterHash}.${namespace}.svc:9113", timeout: 30, httpMode: 'GET'
+                                                  println("GET prometheus root status: " + response.status)
+                                                  println("GET prometheus root content: " + response.content)
+                                                  response = httpRequest ignoreSslErrors: true, url: "http://mongoexporter-${frontName}-${params.mongoexporterHash}.${namespace}.svc:9113/metrics", timeout: 30, httpMode: 'GET'
+                                                  println("GET prometheus metric status: " + response.status)
+                                                  println("GET prometheus metric content: " + response.content)
+                                              }
+                                          }
+                                      } catch(e) {
+                                          echo "In catch block while checking MongoDB Exporter - ${e}"
+                                          throw e
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                  }
+                  stage('tag') {
+                      steps {
+                          script {
+                              if ("${params.mongoexporterBranch}" == "${params.mongoexporterHash}") { echo "skipping tag - source matches target" }
+                              else {
+                                  openshift.withCluster() {
+                                      openshift.withProject() {
+                                          try {
+                                              timeout(5) {
+                                                  def namespace = "${openshift.project()}"
+                                                  retry(3) {
+                                                      sh """
+                                                      oc login https://kubernetes.default.svc.cluster.local --certificate-authority=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt --token=\$(cat /var/run/secrets/kubernetes.io/serviceaccount/token) > /dev/null 2>&1
+                                                      oc tag -n ${namespace} mongoexporter-wsweet:${params.mongoexporterHash} mongoexporter-wsweet:${params.mongoexporterBranch}
+                                                      """
+                                                  }
+                                              }
+                                          } catch(e) {
+                                              echo "In catch block while tagging MongoDB Exporter image - ${e}"
+                                              throw e
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+              post {
+                  always {
+                      script {
+                          openshift.withCluster() {
+                              openshift.withProject() {
+                                  def namespace   = "${openshift.project()}"
+                                  def postJobName = "${namespace}/${namespace}-post-triggers-jenkins-pipeline"
+                                  currentBuild.description = """
+                                  ${params.mongoexporterRepo} ${params.mongoexporterBranch} (try ${params.jobRetryCount}/${params.jobMaxRetry})
+                                  ${gitCommitMsg}
+                                  """.stripIndent()
+                                  echo "cleaning up assets for mongoexporter-wsweet-${params.mongoexporterHash}"
+                                  sh "rm -fr /tmp/workspace/${namespace}/${namespace}-mongoexporter-jenkins-pipeline/tmpmongoexporter${params.mongoexporterBranch}"
+                                  openshift.selector("buildconfigs", [ "${templateSel}": "${templateMark}-${params.mongoexporterHash}" ]).delete()
+                                  openshift.selector("deploymentconfigs", [ "${templateSel}": "${templateMark}-${params.mongoexporterHash}" ]).delete()
+                                  openshift.selector("configmaps", [ "${templateSel}": "${templateMark}-${params.mongoexporterHash}" ]).delete()
+                                  openshift.selector("secrets", [ "${templateSel}": "${templateMark}-${params.mongoexporterHash}" ]).delete()
+                                  def jobParams = [
+                                          [$class: 'StringParameterValue', name: "jobMaxRetry", value: params.jobMaxRetry],
+                                          [$class: 'StringParameterValue', name: "jobRetryCount", value: params.jobRetryCount],
+                                          [$class: 'StringParameterValue', name: "jobStatus", value: currentBuild.currentResult],
+                                          [$class: 'StringParameterValue', name: "sourceBranch", value: params.mongoexporterBranch],
+                                          [$class: 'StringParameterValue', name: "sourceComponent", value: "mongoexporter"],
+                                          [$class: 'StringParameterValue', name: "sourceRef", value: params.mongoexporterHash],
+                                          [$class: 'StringParameterValue', name: "sourceRepo", value: params.mongoexporterRepo]
+                                      ]
+                                  try { build job: postJobName, parameters: jobParams, propagate: false, wait: false }
+                                  catch(e) { echo "caught ${e} starting Job post-process" }
+                              }
+                          }
+                      }
+                  }
+                  changed { echo "changed?" }
+                  failure { echo "Build failed (${params.jobRetryCount} out of ${params.jobMaxRetry})" }
+                  success { echo "success!" }
+                  unstable { echo "unstable?" }
+              }
+          }
+      type: JenkinsPipeline
+parameters:
+- name: GIT_SOURCE_HOST
+  description: Git FQDN we would build images from
+  displayName: Git
+  value: git.worteks.com

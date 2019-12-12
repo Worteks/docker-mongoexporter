@@ -1,0 +1,225 @@
+apiVersion: v1
+kind: Template
+labels:
+  app: mongoexporter
+  template: mongoexporter-persistent
+metadata:
+  annotations:
+    description: MongoDB Exporter - persistent
+      see https://github.com/Worteks/docker-mongoexporter
+    iconClass: icon-mongodb
+    openshift.io/display-name: MongoDB with Exporter
+    tags: exporter,prometheus,mongodb
+  name: mongoexporter-persistent
+objects:
+- apiVersion: v1
+  kind: PersistentVolumeClaim
+  metadata:
+    name: mongodb-${FRONTNAME}
+  spec:
+    accessModes:
+    - ReadWriteOnce
+    resources:
+      requests:
+        storage: ${MONGODB_VOLUME_CAPACITY}
+- apiVersion: v1
+  kind: DeploymentConfig
+  metadata:
+    labels:
+     name: mongodb-${FRONTNAME}
+    name: mongodb-${FRONTNAME}
+  spec:
+    replicas: 1
+    selector:
+      name: mongodb-${FRONTNAME}
+    strategy:
+      type: Recreate
+    template:
+      metadata:
+        labels:
+          name: mongodb-${FRONTNAME}
+      spec:
+        containers:
+        - env:
+          - name: MONGODB_USER
+            valueFrom:
+              secretKeyRef:
+                key: database-user
+                name: mongodb-${FRONTNAME}
+          - name: MONGODB_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                key: database-password
+                name: mongodb-${FRONTNAME}
+          - name: MONGODB_ADMIN_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                key: database-admin-password
+                name: mongodb-${FRONTNAME}
+          - name: MONGODB_DATABASE
+            valueFrom:
+              secretKeyRef:
+                key: database-name
+                name: mongodb-${FRONTNAME}
+          image: ' '
+          imagePullPolicy: IfNotPresent
+          livenessProbe:
+            initialDelaySeconds: 30
+            tcpSocket:
+              port: 27017
+            timeoutSeconds: 1
+          name: mongodb
+          ports:
+          - containerPort: 27017
+            protocol: TCP
+          readinessProbe:
+            exec:
+              command:
+              - /bin/sh
+              - -i
+              - -c
+              - 'mongo 127.0.0.1:27017/$MONGODB_DATABASE -u $MONGODB_USER -p $MONGODB_PASSWORD --eval="quit()"'
+            initialDelaySeconds: 3
+            timeoutSeconds: 1
+          resources:
+            limits:
+              cpu: ${MONGODB_CPU_LIMIT}
+              memory: ${MONGODB_MEMORY_LIMIT}
+          terminationMessagePath: /dev/termination-log
+          volumeMounts:
+          - mountPath: /var/lib/mongodb/data
+            name: mongodb
+        - image: ' '
+          imagePullPolicy: IfNotPresent
+          livenessProbe:
+            initialDelaySeconds: 30
+            timeoutSeconds: 1
+            tcpSocket:
+              port: 9113
+          name: exporter
+          ports:
+          - containerPort: 9113
+            protocol: TCP
+          readinessProbe:
+            initialDelaySeconds: 5
+            httpGet:
+              path: /
+              port: 9113
+            periodSeconds: 20
+            timeoutSeconds: 5
+          resources:
+            limits:
+              cpu: "${EXPORTER_CPU_LIMIT}"
+              memory: "${EXPORTER_MEMORY_LIMIT}"
+        dnsPolicy: ClusterFirst
+        restartPolicy: Always
+        volumes:
+        - name: mongodb
+          persistentVolumeClaim:
+            claimName: mongodb-${FRONTNAME}
+    triggers:
+    - imageChangeParams:
+        automatic: true
+        containerNames:
+        - mongodb
+        from:
+          kind: ImageStreamTag
+          name: mongodb-wsweet:${MONGODB_VERSION}
+      type: ImageChange
+    - imageChangeParams:
+        automatic: true
+        containerNames:
+        - exporter
+        from:
+          kind: ImageStreamTag
+          name: mongoexporter-${MONGO_EXPORTER_IMAGE_FRONTNAME}:${MONGO_EXPORTER_IMAGE_TAG}
+      type: ImageChange
+    - type: ConfigChange
+- apiVersion: v1
+  kind: Service
+  metadata:
+    annotations:
+      template.openshift.io/expose-uri: mongodb://{.spec.clusterIP}:{.spec.ports[?(.name=="mongo")].port}
+    name: mongodb-${FRONTNAME}
+  spec:
+    ports:
+    - name: mongo
+      port: 27017
+      protocol: TCP
+      targetPort: 27017
+    selector:
+      name: mongodb-${FRONTNAME}
+    type: ClusterIP
+- apiVersion: v1
+  kind: Service
+  metadata:
+    annotations:
+      description: Exposes MongoDB Prometheus Exporter
+    labels:
+      ${PROMETHEUS_SERVICE_SELECTOR}: ${PROMETHEUS_SERVICE_MATCH}
+    name: mongoexporter-${FRONTNAME}
+  spec:
+    ports:
+    - name: exporter
+      port: 9113
+      protocol: TCP
+      targetPort: 9113
+    selector:
+      name: mongodb-${FRONTNAME}
+    type: ClusterIP
+parameters:
+- name: EXPORTER_CPU_LIMIT
+  description: Maximum amount of CPU an exporter container can use
+  displayName: Exporters CPU Limit
+  required: true
+  value: 50m
+- name: EXPORTER_MEMORY_LIMIT
+  description: Maximum amount of Memory an exporter container can use
+  displayName: Exporters Memory Limit
+  required: true
+  value: 64Mi
+- name: FRONTNAME
+  description: The name identifier assigned to objects defined in this template
+  displayName: Name
+  required: true
+  value: demo
+- name: MONGO_EXPORTER_IMAGE_FRONTNAME
+  description: The name assigned to ImageStream object defined in corresponding template
+  displayName: Name
+  required: true
+  value: wsweet
+- name: MONGO_EXPORTER_IMAGE_TAG
+  description: The ImageStreamTag we should pull images from
+  displayName: Tag
+  required: true
+  value: master
+- name: MONGODB_CPU_LIMIT
+  description: Maximum amount of CPU the container can use.
+  displayName: CPU Limit
+  required: true
+  value: 300m
+- name: MONGODB_MEMORY_LIMIT
+  description: Maximum amount of memory the container can use.
+  displayName: Memory Limit
+  required: true
+  value: 512Mi
+- name: MONGODB_VERSION
+  description: Version of MongoDB image to be used (2.4, 2.6, 3.2 or latest).
+  displayName: Version of MongoDB Image
+  required: true
+  value: master
+- name: MONGODB_VOLUME_CAPACITY
+  description: Volume space available for data, e.g. 512Mi, 2Gi.
+  displayName: Volume Capacity
+  required: true
+  value: 1Gi
+- name: PROMETHEUS_SERVICE_SELECTOR
+  description: Prometheus Selector (key)
+  displayName: Prometheus Service Selector Key
+  required: true
+  value: prometheus
+- name: PROMETHEUS_SERVICE_MATCH
+  description: Prometheus Selector (value)
+  displayName: Prometheus Service Selector Value
+  required: true
+  value: scrape-me

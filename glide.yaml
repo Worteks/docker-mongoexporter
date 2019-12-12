@@ -1,0 +1,13 @@
+package: github.com/dcu/mongodb_exporter
+import:
+- package: github.com/golang/glog
+- package: github.com/prometheus/client_golang
+  version: v0.8.0
+  subpackages:
+  - prometheus
+- package: gopkg.in/mgo.v2
+  subpackages:
+  - bson
+- package: github.com/rwynn/gtm
+  version: 495abc277593067479c3c528864191804ab04cf7
+  repo: https://github.com/jacksontj/gtm.git
